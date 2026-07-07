@@ -109,8 +109,6 @@ class GPT(nn.Module):
 
         idx = torch.cat((idx, idx_next), dim=1)
 
-        # early stop opzionale — utile per SumGPT (stop_token='\n'),
-        # None di default per prosa libera dove non ha senso fermarsi
         if stop_token is not None and decode is not None:
             if decode([idx_next.item()]) == stop_token:
                 break

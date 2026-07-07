@@ -11,3 +11,4 @@ temp.py
 
 checkpoints/**/last.pt
 checkpoints/local-*/
+tests/
