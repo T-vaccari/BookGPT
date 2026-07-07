@@ -1,4 +1,13 @@
-data/
-file/
-checkpoints/
 __pycache__/
+*.pyc
+*.tmp
+
+corpus/
+data/
+data.py
+prepare.py
+convert_odt.py
+temp.py
+
+checkpoints/**/last.pt
+checkpoints/local-*/

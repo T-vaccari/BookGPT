@@ -1,0 +1,1 @@
+training con context di 256, scalato a 1024

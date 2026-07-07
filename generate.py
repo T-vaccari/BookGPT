@@ -1,112 +1,102 @@
 import os
 import pickle
+
 import torch
+
+from checkpoint_utils import format_model_specs, list_checkpoints, load_checkpoint
 from model import GPT
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-device          = 'cuda'
-ckpt_dir        = 'checkpoints'
-data_dir        = 'data'
-max_new_tokens  = 500
-temperature     = 1.0
-# ---------------------------------------------------------------------------
 
-# Vocab — stesso meta.pkl del training, mai ricostruito da zero
-with open(os.path.join(data_dir, 'meta.pkl'), 'rb') as f:
-    meta = pickle.load(f)
-stoi, itos = meta['stoi'], meta['itos']
+CHECKPOINT_ROOT = "checkpoints"
+DATA_DIR = "data/italian-books"
+DEVICE = "cuda"
 
-def encode(s):
-    try:
-        return [stoi[c] for c in s]
-    except KeyError as e:
-        raise ValueError(
-            f"Carattere {e} assente dal vocabolario ({len(stoi)} simboli). Rimuovilo dal contesto."
+
+def choose_checkpoint():
+    checkpoints = list_checkpoints(CHECKPOINT_ROOT)
+    if not checkpoints:
+        raise FileNotFoundError("Nessun checkpoint addestrato disponibile")
+
+    print("Scegli il modello:")
+    for index, checkpoint in enumerate(checkpoints, 1):
+        config = checkpoint["config"]
+        print(
+            f"{index}. {checkpoint['name']} | step {checkpoint['step']} | "
+            f"loss {checkpoint['best_val_loss']:.4f} | context {config['block_size']} | "
+            f"embedding {config['n_embd']} | {config['n_blocks']} layer"
         )
 
-decode = lambda l: ''.join(itos[i] for i in l)
-
-# Miglior checkpoint — train.py sovrascrive ckpt_best.pt solo quando il val
-# loss migliora, quindi è già "il migliore disponibile" per costruzione
-ckpt   = torch.load(os.path.join(ckpt_dir, 'ckpt_best.pt'), map_location=device, weights_only=True)
-config = ckpt['config']
-
-model = GPT(
-    vocab_size = config['vocab_size'],
-    n_embd     = config['n_embd'],
-    n_head     = config['n_head'],
-    block_size = config['block_size'],
-    n_blocks   = config['n_blocks'],
-    dropout    = config['dropout'],
-).to(device)
-
-model.load_state_dict(ckpt['model'])
-model.eval()   # disattiva dropout — senza questo si genera con rumore casuale ancora attivo
-
-print(f"Checkpoint: step {ckpt['step']} | best val loss {ckpt['best_val_loss']:.4f}")
-print(f"Parametri: {sum(p.numel() for p in model.parameters()):,}")
-print(f"max_new_tokens={max_new_tokens}  temperature={temperature}")
-print("Comandi: /tokens N   /temp X   /quit\n")
-
-
-# ---------------------------------------------------------------------------
-# Generazione — loop manuale, NON model.generate()
-# (model.generate() si fermerebbe al primo '\n', sbagliato per prosa libera)
-# ---------------------------------------------------------------------------
-@torch.no_grad()
-def generate(idx, max_new_tokens, temperature):
-    for _ in range(max_new_tokens):
-        idx_cond  = idx[:, -model.block_size:]
-        logits, _ = model(idx_cond)
-        logits    = logits[:, -1, :]
-
-        if temperature <= 0:
-            idx_next = logits.argmax(dim=-1, keepdim=True)   # greedy — nessuna divisione, nessuna softmax
-        else:
-            logits   = logits / temperature
-            probs    = torch.softmax(logits, dim=-1)
-            idx_next = torch.multinomial(probs, num_samples=1)
-
-        idx = torch.cat((idx, idx_next), dim=1)
-    return idx
-
-
-# ---------------------------------------------------------------------------
-# Loop interattivo
-# ---------------------------------------------------------------------------
-while True:
-    context = input(">>> ").strip()
-
-    if context in ('/quit', '/exit'):
-        break
-
-    if context.startswith('/tokens '):
+    while True:
         try:
-            max_new_tokens = int(context.split(' ', 1)[1])
-            print(f"max_new_tokens = {max_new_tokens}")
-        except ValueError:
-            print("Uso: /tokens 500")
-        continue
+            return checkpoints[int(input("> ")) - 1]["path"]
+        except (ValueError, IndexError):
+            print("Scelta non valida")
 
-    if context.startswith('/temp '):
+
+def main():
+    checkpoint_path = choose_checkpoint()
+    checkpoint = load_checkpoint(checkpoint_path, DEVICE)
+    config = checkpoint["config"]
+
+    with open(os.path.join(DATA_DIR, "meta.pkl"), "rb") as file:
+        meta = pickle.load(file)
+    stoi, itos = meta["stoi"], meta["itos"]
+    if meta["vocab_size"] != config["vocab_size"]:
+        raise ValueError("Il vocabolario non corrisponde al checkpoint selezionato")
+
+    def encode(text):
         try:
-            temperature = float(context.split(' ', 1)[1])
-            print(f"temperature = {temperature}")
-        except ValueError:
-            print("Uso: /temp 0.8")
-        continue
+            return [stoi[character] for character in text]
+        except KeyError as error:
+            raise ValueError(f"Carattere {error} assente dal vocabolario") from error
 
-    if context == '':
-        context = '\n'   # serve almeno un carattere per avviare la generazione
+    def decode(tokens):
+        return "".join(itos[token] for token in tokens)
 
-    try:
-        idx = torch.tensor([encode(context)], dtype=torch.long, device=device)
-    except ValueError as e:
-        print(e)
-        continue
+    model = GPT(**config).to(DEVICE)
+    model.load_state_dict(checkpoint["model"])
+    model.eval()
 
-    out = generate(idx, max_new_tokens, temperature)
-    print(decode(out[0].tolist()))
-    print()
+    parameter_count = sum(parameter.numel() for parameter in model.parameters())
+    print(f"Checkpoint: {checkpoint_path}")
+    print(format_model_specs(checkpoint, parameter_count, DEVICE))
+
+    max_new_tokens = 500
+    temperature = 1.0
+    print("Comandi: /tokens N   /temp X   /quit\n")
+
+    while True:
+        context = input(">>> ").strip()
+        if context in ("/quit", "/exit"):
+            break
+        if context.startswith("/tokens "):
+            try:
+                max_new_tokens = int(context.split(" ", 1)[1])
+                print(f"max_new_tokens = {max_new_tokens}")
+            except ValueError:
+                print("Uso: /tokens 500")
+            continue
+        if context.startswith("/temp "):
+            try:
+                temperature = float(context.split(" ", 1)[1])
+                print(f"temperature = {temperature}")
+            except ValueError:
+                print("Uso: /temp 0.8")
+            continue
+        if not context:
+            context = "\n"
+
+        try:
+            indices = torch.tensor([encode(context)], dtype=torch.long, device=DEVICE)
+        except ValueError as error:
+            print(error)
+            continue
+
+        with torch.no_grad():
+            output = model.generate(indices, max_new_tokens, temperature=temperature)
+        print(decode(output[0].tolist()))
+        print()
+
+
+if __name__ == "__main__":
+    main()

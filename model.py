@@ -67,7 +67,7 @@ class Block(nn.Module):
 
 
 class GPT(nn.Module):
-    def __init__(self, vocab_size, n_embd, n_head, block_size, n_blocks=4, dropout=0.1):
+   def __init__(self, vocab_size, n_embd, n_head, block_size, n_blocks=4, dropout=0.1):
       super().__init__()
       self.block_size = block_size
 
@@ -77,7 +77,7 @@ class GPT(nn.Module):
       self.layer_norm               = nn.LayerNorm(n_embd)
       self.lm_head                  = nn.Linear(n_embd, vocab_size)
 
-    def forward(self, idx, targets=None):
+   def forward(self, idx, targets=None):
       B, T = idx.shape
 
       tok_emb = self.token_embedding_table(idx)                                    # (B, T, n_embd)
@@ -95,14 +95,24 @@ class GPT(nn.Module):
 
       return logits, loss
 
-    def generate(self, idx, max_new_tokens, decode):
+   def generate(self, idx, max_new_tokens, temperature=1.0, stop_token=None, decode=None):
       for _ in range(max_new_tokens):
-         idx_cond  = idx[:, -self.block_size:]
-         logits, _ = self(idx_cond)
-         logits    = logits[:, -1, :]
-         probs     = F.softmax(logits, dim=-1)
-         idx_next  = torch.multinomial(probs, num_samples=1)
-         idx       = torch.cat((idx, idx_next), dim=1)
-         if decode([idx_next.item()]) == '\n':
-               break
+        idx_cond  = idx[:, -self.block_size:]
+        logits, _ = self(idx_cond)
+        logits    = logits[:, -1, :]
+
+        if temperature <= 0:
+            idx_next = logits.argmax(dim=-1, keepdim=True)   # greedy, nessuna softmax
+        else:
+            probs    = F.softmax(logits / temperature, dim=-1)
+            idx_next = torch.multinomial(probs, num_samples=1)
+
+        idx = torch.cat((idx, idx_next), dim=1)
+
+        # early stop opzionale — utile per SumGPT (stop_token='\n'),
+        # None di default per prosa libera dove non ha senso fermarsi
+        if stop_token is not None and decode is not None:
+            if decode([idx_next.item()]) == stop_token:
+                break
+
       return idx

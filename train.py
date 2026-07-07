@@ -1,148 +1,177 @@
 import os
-# must be set before CUDA context initializes — fixes allocator fragmentation
-os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+from contextlib import nullcontext
 import pickle
+from types import SimpleNamespace
+
 import numpy as np
 import torch
+
+from checkpoint_utils import format_model_specs, list_checkpoints, load_checkpoint
 from model import GPT
 
-# ---------------------------------------------------------------------------
-# Hyperparameters
-# ---------------------------------------------------------------------------
-batch_size    = 128           
-block_size    = 256
-max_iters     = 10000
-eval_interval = 250
-eval_iters    = 100
-learning_rate = 3e-4
-n_embd        = 128
-n_head        = 4
-n_blocks      = 4
-dropout       = 0.1          
-device        = 'cuda'
-ckpt_dir      = 'checkpoints'
-data_dir      = 'data'
-RESUME = False
-# ---------------------------------------------------------------------------
 
-torch.manual_seed(1337)
-os.makedirs(ckpt_dir, exist_ok=True)
+def choose_training():
+    checkpoint_root = "checkpoints"
+    runs = [
+        checkpoint for checkpoint in list_checkpoints(checkpoint_root)
+        if (checkpoint["path"].parent / "last.pt").is_file()
+    ]
 
-# ---------------------------------------------------------------------------
-# Vocab — loaded from meta.pkl, built by prepare.py from the full corpus
-# ---------------------------------------------------------------------------
-with open(os.path.join(data_dir, 'meta.pkl'), 'rb') as f:
-    meta = pickle.load(f)
-stoi, itos, vocab_size = meta['stoi'], meta['itos'], meta['vocab_size']
-encode = lambda s: [stoi[c] for c in s]
-decode = lambda l: ''.join(itos[i] for i in l)
-print(f"vocab_size: {vocab_size}")
+    print("0. Nuovo training")
+    for index, checkpoint in enumerate(runs, 1):
+        config = checkpoint["config"]
+        print(
+            f"{index}. Riprendi {checkpoint['name']} | step {checkpoint['step']} | "
+            f"context {config['block_size']} | embedding {config['n_embd']}"
+        )
 
-# ---------------------------------------------------------------------------
-# Data — memory mapped, dtype derived from vocab_size to match prepare.py
-# ---------------------------------------------------------------------------
-dtype      = np.uint8 if vocab_size <= 256 else np.uint16
-train_data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=dtype, mode='r')
-val_data   = np.memmap(os.path.join(data_dir, 'val.bin'),   dtype=dtype, mode='r')
-print(f"train: {len(train_data):,} chars | val: {len(val_data):,} chars")
+    while True:
+        try:
+            choice = int(input("> "))
+            if choice == 0:
+                run_name = input("Nome del nuovo run: ").strip()
+                if run_name:
+                    resume = None
+                    break
+            elif 1 <= choice <= len(runs):
+                run_name = None
+                resume = runs[choice - 1]["name"]
+                break
+        except ValueError:
+            pass
+        print("Scelta non valida")
 
-
-def get_batch(split):
-    data = train_data if split == 'train' else val_data
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([torch.from_numpy(data[i:i + block_size].astype(np.int64))       for i in ix])
-    y = torch.stack([torch.from_numpy(data[i + 1:i + block_size + 1].astype(np.int64)) for i in ix])
-    return x.to(device), y.to(device)
+    return SimpleNamespace(
+        run_name=run_name, resume=resume, checkpoint_root=checkpoint_root,
+        data_dir="data/italian-books", device="cuda", batch_size=64,
+        block_size=256, max_iters=10000, eval_interval=250, eval_iters=100,
+        learning_rate=3e-4, n_embd=384, n_head=6, n_blocks=4, dropout=0.15,
+    )
 
 
-# ---------------------------------------------------------------------------
-# Model, optimizer, fp16 scaler
-# ---------------------------------------------------------------------------
-model     = GPT(vocab_size, n_embd, n_head, block_size, n_blocks, dropout).to(device)
-optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-scaler    = torch.cuda.amp.GradScaler()   # fp16 mixed precision; bf16 unreliable on gfx1010, torch.amp.GradScaler not exported on this dev build
-
-print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
-
-
-# ---------------------------------------------------------------------------
-# Eval
-# ---------------------------------------------------------------------------
-@torch.no_grad()
-def estimate_loss():
-    model.eval()
-    out = {}
-    for split in ['train', 'val']:
-        losses = torch.zeros(eval_iters)
-        for k in range(eval_iters):
-            X, Y = get_batch(split)
-            with torch.autocast(device_type='cuda', dtype=torch.float16):
-                _, loss = model(X, Y)
-            losses[k] = loss.item()
-        out[split] = losses.mean()
-    model.train()
-    return out
+def model_config(args, vocab_size, checkpoint=None):
+    if checkpoint is not None:
+        return checkpoint["config"]
+    return {
+        "vocab_size": vocab_size, "n_embd": args.n_embd,
+        "n_head": args.n_head, "block_size": args.block_size,
+        "n_blocks": args.n_blocks, "dropout": args.dropout,
+    }
 
 
-# ---------------------------------------------------------------------------
-# Checkpoint
-# ---------------------------------------------------------------------------
-def save_checkpoint(path, step, best_val_loss):
-    tmp = path + '.tmp'
-    torch.save({
-        'model':         model.state_dict(),
-        'optimizer':     optimizer.state_dict(),
-        'scaler':        scaler.state_dict(),
-        'step':          step,
-        'best_val_loss': best_val_loss,
-        'config': {
-            'vocab_size': vocab_size,
-            'n_embd':     n_embd,
-            'n_head':     n_head,
-            'block_size': block_size,
-            'n_blocks':   n_blocks,
-            'dropout':    dropout,
-        },
-    }, tmp)
-    os.replace(tmp, path)
+def main():
+    args = choose_training()
+    torch.manual_seed(1337)
+
+    checkpoint = None
+    best_checkpoint = None
+    if args.resume:
+        checkpoint_dir = os.path.join(args.checkpoint_root, args.resume)
+        checkpoint_path = os.path.join(checkpoint_dir, "last.pt")
+        checkpoint = load_checkpoint(checkpoint_path, args.device)
+        best_path = os.path.join(checkpoint_dir, "best.pt")
+        if os.path.isfile(best_path):
+            best_checkpoint = load_checkpoint(best_path, args.device)
+    else:
+        checkpoint_dir = os.path.join(args.checkpoint_root, args.run_name)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    with open(os.path.join(args.data_dir, "meta.pkl"), "rb") as file:
+        meta = pickle.load(file)
+    vocab_size = meta["vocab_size"]
+    config = model_config(args, vocab_size, checkpoint)
+    if config["vocab_size"] != vocab_size:
+        raise ValueError("Il vocabolario non corrisponde al checkpoint selezionato")
+
+    dtype = np.uint8 if vocab_size <= 256 else np.uint16
+    train_data = np.memmap(os.path.join(args.data_dir, "train.bin"), dtype=dtype, mode="r")
+    val_data = np.memmap(os.path.join(args.data_dir, "val.bin"), dtype=dtype, mode="r")
+    block_size = config["block_size"]
+
+    def get_batch(split):
+        data = train_data if split == "train" else val_data
+        indices = torch.randint(len(data) - block_size, (args.batch_size,))
+        x = torch.stack([torch.from_numpy(data[i:i + block_size].astype(np.int64)) for i in indices])
+        y = torch.stack([torch.from_numpy(data[i + 1:i + block_size + 1].astype(np.int64)) for i in indices])
+        return x.to(args.device), y.to(args.device)
+
+    model = GPT(**config).to(args.device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
+    scaler = torch.amp.GradScaler("cuda", enabled=args.device.startswith("cuda"))
+
+    start_step = 0
+    best_val_loss = float("inf")
+    if checkpoint is not None:
+        model.load_state_dict(checkpoint["model"])
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        scaler.load_state_dict(checkpoint["scaler"])
+        start_step = int(checkpoint["step"]) + 1
+        losses = [float(checkpoint["best_val_loss"])]
+        if best_checkpoint is not None:
+            losses.append(float(best_checkpoint["best_val_loss"]))
+        best_val_loss = min(losses)
+        print(f"Ripresa da: {checkpoint_path}")
+
+    specs = dict(checkpoint) if checkpoint is not None else {"config": config, "step": 0}
+    specs["best_val_loss"] = best_val_loss
+    parameters = sum(parameter.numel() for parameter in model.parameters())
+    print(format_model_specs(specs, parameters, args.device))
+
+    def autocast_context():
+        return torch.autocast(device_type="cuda", dtype=torch.float16) if args.device.startswith("cuda") else nullcontext()
+
+    @torch.no_grad()
+    def estimate_loss():
+        model.eval()
+        output = {}
+        for split in ("train", "val"):
+            losses = torch.zeros(args.eval_iters)
+            for index in range(args.eval_iters):
+                x, y = get_batch(split)
+                with autocast_context():
+                    _, loss = model(x, y)
+                losses[index] = loss.item()
+            output[split] = losses.mean()
+        model.train()
+        return output
+
+    def save_checkpoint(path, step, current_best_loss):
+        temporary_path = f"{path}.tmp"
+        torch.save({
+            "model": model.state_dict(), "optimizer": optimizer.state_dict(),
+            "scaler": scaler.state_dict(), "step": step,
+            "best_val_loss": current_best_loss, "config": config,
+            "training_config": {
+                "batch_size": args.batch_size, "max_iters": args.max_iters,
+                "eval_interval": args.eval_interval, "eval_iters": args.eval_iters,
+                "learning_rate": args.learning_rate,
+            },
+        }, temporary_path)
+        os.replace(temporary_path, path)
+
+    for step in range(start_step, args.max_iters):
+        if step % args.eval_interval == 0:
+            losses = estimate_loss()
+            print(f"step {step:5d} | train {losses['train']:.4f} | val {losses['val']:.4f}")
+            if losses["val"] < best_val_loss:
+                best_val_loss = float(losses["val"])
+                save_checkpoint(os.path.join(checkpoint_dir, "best.pt"), step, best_val_loss)
+                print(f"best val {best_val_loss:.4f} salvato")
+            save_checkpoint(os.path.join(checkpoint_dir, "last.pt"), step, best_val_loss)
+
+        x, y = get_batch("train")
+        with autocast_context():
+            _, loss = model(x, y)
+        optimizer.zero_grad(set_to_none=True)
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
+    print("Done.")
 
 
-# ---------------------------------------------------------------------------
-# Training loop
-# ---------------------------------------------------------------------------
-best_val_loss = float('inf')
-start_step    = 0
-
-if RESUME:
-    ckpt = torch.load(f'{ckpt_dir}/ckpt_last.pt', map_location=device, weights_only=True)
-    model.load_state_dict(ckpt['model'])
-    optimizer.load_state_dict(ckpt['optimizer'])
-    scaler.load_state_dict(ckpt['scaler'])
-    start_step    = ckpt['step']
-    best_val_loss = ckpt['best_val_loss']
-    print(f"Resuming from step {start_step} | best val {best_val_loss:.4f}")
-
-for step in range(start_step, max_iters):
-
-    if step % eval_interval == 0:
-        losses = estimate_loss()
-        print(f"step {step:5d} | train {losses['train']:.4f} | val {losses['val']:.4f}")
-
-        save_checkpoint(f'{ckpt_dir}/ckpt_last.pt', step, best_val_loss)
-        if losses['val'] < best_val_loss:
-            best_val_loss = losses['val']
-            save_checkpoint(f'{ckpt_dir}/ckpt_best.pt', step, best_val_loss)
-            print(f"            → best val {best_val_loss:.4f} saved")
-
-    xb, yb = get_batch('train')
-
-    with torch.autocast(device_type='cuda', dtype=torch.float16):
-        logits, loss = model(xb, yb)
-
-    optimizer.zero_grad(set_to_none=True)
-    scaler.scale(loss).backward()
-    scaler.step(optimizer)
-    scaler.update()
-
-print("Done.")
+if __name__ == "__main__":
+    main()
