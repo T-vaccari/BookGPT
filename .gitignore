@@ -14,3 +14,5 @@ runs/
 tests/
 
 .venv/
+
+run-unattended.sh
