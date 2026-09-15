@@ -1,108 +1,43 @@
-import os
-import pickle
+import argparse
+from pathlib import Path
 
 import torch
 
-from checkpoint_utils import format_model_specs, list_checkpoints, load_checkpoint
-from model import GPT
+from llm_library.bpe.tokenizer import Tokenizer
+from model import build_model
 
 
-CHECKPOINT_ROOT = "checkpoints"
-DATA_DIR = "data/italian-books"
-DEVICE = "cuda"
-
-
-def choose_checkpoint():
-    checkpoints = list_checkpoints(CHECKPOINT_ROOT)
-    if not checkpoints:
-        raise FileNotFoundError("Nessun checkpoint addestrato disponibile")
-
-    print("Scegli il modello:")
-    for index, checkpoint in enumerate(checkpoints, 1):
-        config = checkpoint["config"]
-        print(
-            f"{index}. {checkpoint['name']} | step {checkpoint['step']} | "
-            f"loss {checkpoint['best_val_loss']:.4f} | context {config['block_size']} | "
-            f"embedding {config['n_embd']} | {config['n_blocks']} layer"
-        )
-
-    while True:
-        try:
-            return checkpoints[int(input("> ")) - 1]["path"]
-        except (ValueError, IndexError):
-            print("Scelta non valida")
+ROOT = Path(__file__).parent
+TOKENIZER = ROOT / "tokenizer" / "italian-books-bpe-v1"
+EOT = "<|endoftext|>"
+PROMPTS = ["Il", "La storia", "Nella notte", "Quando"]
 
 
 def main():
-    checkpoint_path = choose_checkpoint()
-    checkpoint = load_checkpoint(checkpoint_path, DEVICE)
-    config = checkpoint["config"]
-
-    with open(os.path.join(DATA_DIR, "meta.pkl"), "rb") as file:
-        meta = pickle.load(file)
-    stoi, itos = meta["stoi"], meta["itos"]
-    if meta["vocab_size"] != config["vocab_size"]:
-        raise ValueError("Il vocabolario non corrisponde al checkpoint selezionato")
-
-    def encode(text):
-        try:
-            return [stoi[character] for character in text]
-        except KeyError as error:
-            raise ValueError(f"Carattere {error} assente dal vocabolario") from error
-
-    def decode(tokens):
-        return "".join(itos[token] for token in tokens)
-
-    attention_implementation = "gfx1010" if DEVICE.startswith("cuda") else "torch"
-    model = GPT(
-        **config,
-        attention_implementation=attention_implementation,
-    ).to(DEVICE)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint", default="checkpoints/llm-library-bpe-5m/best.pt")
+    parser.add_argument("--tokens", type=int, default=160)
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--prompt", action="append")
+    args = parser.parse_args()
+    device = torch.device(args.device)
+    checkpoint = torch.load(ROOT / args.checkpoint, map_location=device, weights_only=False)
+    tokenizer = Tokenizer.from_files(TOKENIZER / "vocab.pkl", TOKENIZER / "merges.pkl", [EOT])
+    model = build_model(checkpoint["config"], device)
     model.load_state_dict(checkpoint["model"])
     model.eval()
-
-    parameter_count = sum(parameter.numel() for parameter in model.parameters())
-    print(f"Checkpoint: {checkpoint_path}")
-    print(format_model_specs(checkpoint, parameter_count, DEVICE))
-
-    max_new_tokens = 500
-    temperature = 1.0
-    print("Comandi: /tokens N   /temp X   /quit\n")
-
-    while True:
-        context = input(">>> ").strip()
-        if context in ("/quit", "/exit"):
-            break
-        if context.startswith("/tokens "):
-            try:
-                max_new_tokens = int(context.split(" ", 1)[1])
-                print(f"max_new_tokens = {max_new_tokens}")
-            except ValueError:
-                print("Uso: /tokens 500")
-            continue
-        if context.startswith("/temp "):
-            try:
-                temperature = float(context.split(" ", 1)[1])
-                print(f"temperature = {temperature}")
-            except ValueError:
-                print("Uso: /temp 0.8")
-            continue
-        if not context:
-            context = "\n"
-
-        try:
-            indices = torch.tensor([encode(context)], dtype=torch.long, device=DEVICE)
-        except ValueError as error:
-            print(error)
-            continue
-
-        with torch.no_grad(), torch.autocast(
-            device_type="cuda",
-            dtype=torch.float16,
-        ):
-            output = model.generate(indices, max_new_tokens, temperature=temperature)
-        print(decode(output[0].tolist()))
-        print()
+    eot_id = tokenizer.reversed_vocab[EOT.encode("utf-8")]
+    for prompt in args.prompt or PROMPTS:
+        ids = tokenizer.encode(prompt)
+        for _ in range(args.tokens):
+            x = torch.tensor([ids[-checkpoint["config"]["context_length"]:]], device=device)
+            with torch.no_grad():
+                token = int(torch.argmax(model(x)[0, -1]).item())
+            if token == eot_id:
+                break
+            ids.append(token)
+        print(tokenizer.decode(ids))
+        print("\n---\n")
 
 
 if __name__ == "__main__":

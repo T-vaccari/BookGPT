@@ -1,0 +1,86 @@
+{
+  "version": "italian-books-bpe-v1",
+  "vocab_size": 2048,
+  "special_tokens": [
+    "<|endoftext|>"
+  ],
+  "documents": [
+    {
+      "path": "cavalleria_rusticana.txt",
+      "characters": 31191,
+      "train_characters": 28071
+    },
+    {
+      "path": "de_amicis_cuore.txt",
+      "characters": 487419,
+      "train_characters": 438677
+    },
+    {
+      "path": "deledda_canne_al_vento.txt",
+      "characters": 352342,
+      "train_characters": 317107
+    },
+    {
+      "path": "deledda_cenere.txt",
+      "characters": 419422,
+      "train_characters": 377479
+    },
+    {
+      "path": "deledda_elias_portolu.txt",
+      "characters": 273180,
+      "train_characters": 245862
+    },
+    {
+      "path": "deledda_marianna_sirca.txt",
+      "characters": 310088,
+      "train_characters": 279079
+    },
+    {
+      "path": "la_madre.txt",
+      "characters": 215557,
+      "train_characters": 194001
+    },
+    {
+      "path": "nievo_le_confessioni_d_un_italiano.txt",
+      "characters": 2018724,
+      "train_characters": 1816851
+    },
+    {
+      "path": "pinocchio.txt",
+      "characters": 275183,
+      "train_characters": 247664
+    },
+    {
+      "path": "pirandello_il_fu_mattia_pascal.txt",
+      "characters": 453752,
+      "train_characters": 408376
+    },
+    {
+      "path": "pirandello_uno_nessuno.txt",
+      "characters": 268366,
+      "train_characters": 241529
+    },
+    {
+      "path": "promessi_sposi.txt",
+      "characters": 1428907,
+      "train_characters": 1286016
+    },
+    {
+      "path": "verga_i_malavoglia.txt",
+      "characters": 504683,
+      "train_characters": 454214
+    },
+    {
+      "path": "verga_mastro_don_gesualdo.txt",
+      "characters": 659701,
+      "train_characters": 593730
+    },
+    {
+      "path": "verga_tutte_le_novelle.txt",
+      "characters": 1606662,
+      "train_characters": 1445995
+    }
+  ],
+  "train_tokens": 2732735,
+  "val_tokens": 311174
+}

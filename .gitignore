@@ -9,6 +9,6 @@ prepare.py
 convert_odt.py
 temp.py
 
-checkpoints/**/last.pt
-checkpoints/local-*/
+checkpoints/llm-library-*/
+runs/
 tests/
