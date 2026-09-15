@@ -53,7 +53,11 @@ def main():
     def decode(tokens):
         return "".join(itos[token] for token in tokens)
 
-    model = GPT(**config).to(DEVICE)
+    attention_implementation = "gfx1010" if DEVICE.startswith("cuda") else "torch"
+    model = GPT(
+        **config,
+        attention_implementation=attention_implementation,
+    ).to(DEVICE)
     model.load_state_dict(checkpoint["model"])
     model.eval()
 
@@ -92,7 +96,10 @@ def main():
             print(error)
             continue
 
-        with torch.no_grad():
+        with torch.no_grad(), torch.autocast(
+            device_type="cuda",
+            dtype=torch.float16,
+        ):
             output = model.generate(indices, max_new_tokens, temperature=temperature)
         print(decode(output[0].tolist()))
         print()
