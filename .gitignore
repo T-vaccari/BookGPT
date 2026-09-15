@@ -12,3 +12,5 @@ temp.py
 checkpoints/llm-library-*/
 runs/
 tests/
+
+.venv/
